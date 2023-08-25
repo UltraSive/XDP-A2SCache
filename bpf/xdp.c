@@ -5,9 +5,15 @@
 #include <linux/tcp.h>
 #include <linux/udp.h>
 
-struct cached_packet
+#define MAX_A2S_SIZE 1024
+
+struct a2s_info_val
 {
-  __u8 data[1500]; // Adjust the size as needed
+  __u16 size;
+  __u64 expires;
+  unsigned char data[MAX_A2S_SIZE];
+  unsigned char challenge[4];
+  unsigned int challenge_set : 1;
 };
 
 struct server_key
@@ -20,7 +26,7 @@ struct server_key
 BPF_MAP_DEF(query_cache_map) = {
     .map_type = BPF_MAP_TYPE_HASH,
     .key_size = sizeof(struct server_key),
-    .value_size = sizeof(struct cached_packet),
+    .value_size = sizeof(struct a2s_info_val),
     .max_entries = 16,
 };
 BPF_MAP_ADD(query_cache_map);
@@ -73,21 +79,6 @@ static __always_inline void swap_udp(struct udphdr *udph)
   memcpy(&udph->dest, &tmp, sizeof(__be16));
 }
 
-// Function to compare two memory regions
-static inline int bpf_memcmp(const void *s1, const void *s2, size_t n)
-{
-  const __u8 *c1 = s1;
-  const __u8 *c2 = s2;
-  for (; n > 0; n--)
-  {
-    if (*c1 != *c2)
-      return *c1 - *c2;
-    c1++;
-    c2++;
-  }
-  return 0;
-}
-
 SEC("xdp")
 int a2s_response(struct xdp_md *ctx)
 {
@@ -135,8 +126,8 @@ int a2s_response(struct xdp_md *ctx)
         .dst_port = udp->dest,
     };
 
-    struct cached_packet *cached_pkt = bpf_map_lookup_elem(&query_cache_map, &key);
-    if (cached_pkt)
+    struct a2s_info_val *a2s_info = bpf_map_lookup_elem(&query_cache_map, &key);
+    if (a2s_info)
     {
       // Define A2S_INFO packet format
       __u8 a2s_info_packet[] = {
@@ -149,33 +140,35 @@ int a2s_response(struct xdp_md *ctx)
       __u8 *udp_payload = (__u8 *)(udp + 1);
       size_t udp_payload_len = udp->len - sizeof(struct udphdr);
 
-      if (udp_payload_len >= sizeof(a2s_info_packet) /* &&
-           bpf_memcmp(udp_payload, a2s_info_packet, sizeof(a2s_info_packet)) == 0*/
-      )
-      {
+      //if (udp_payload_len >= sizeof(a2s_info_packet) &&
+      //     bpf_memcmp(udp_payload, a2s_info_packet, sizeof(a2s_info_packet)) == 0
+      //)
+      //{
+        __u16 len = (ctx->data_end - ctx->data);
+
         // Swap Mac, IP, and Port to be able to be transfered out the same NIC.
         swap_eth(ether);
         swap_ip(ip);
         swap_udp(udp);
 
         // Recalculate UDP length and checksum.
-        /*
-        udp->len = htons(sizeof(struct udphdr) + a2s->size + 5);
+
+        udp->len = htons(sizeof(struct udphdr) + a2s_info->size + 5);
         udp->check = 0;
         udp->check = calc_udp_csum(ip, udp, data_end);
 
         // Recalculate IP header length and set TTL to 64.
-        
+
         __u16 old_len = ip->tot_len;
         ip->tot_len = htons(len - sizeof(struct ethhdr));
         __u8 old_ttl = ip->ttl;
         ip->ttl = 64;
         ip->check = csum_diff4(old_len, ip->tot_len, ip->check);
-        ip->check = csum_diff4(old_ttl, ip->ttl, ip->check);*/
+        ip->check = csum_diff4(old_ttl, ip->ttl, ip->check);
 
         // Transmit the modified packet
         return XDP_TX;
-      }
+      //}
     }
   }
 
